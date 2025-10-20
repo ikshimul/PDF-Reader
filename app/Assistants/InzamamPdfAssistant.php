@@ -46,7 +46,7 @@ class InzamamPdfAssistant extends PdfClient
     public function processLines(array $lines, ?string $attachmentFilename = null): void
     {
         if (! static::validateFormat($lines)) {
-            throw new Exception('Invalid  PDF');
+            throw new Exception('Invalid PDF');
         }
 
         $orderReference = $this->extractOrderReference($lines);
@@ -58,7 +58,7 @@ class InzamamPdfAssistant extends PdfClient
         $attachmentFilenames = [mb_strtolower($attachmentFilename ?? '')];
         $freightPrice = $freightPrice ?? 0;
         $freightCurrency = $freightCurrency ?? 'EUR';
-        
+
         $data = [
             'customer' => $customer,
             'loading_locations' => $loadingLocations,
@@ -349,38 +349,94 @@ class InzamamPdfAssistant extends PdfClient
      */
     protected function extractCargos(array $lines): array
     {
-        $titleIndex = array_key_first(array_filter($lines, fn ($l) => Str::contains(Str::upper($l), 'PAPER ROLLS') || Str::contains(Str::upper($l), 'PALLETS') || Str::contains(Str::upper($l), 'WEIGHT'))) ?? null;
-        $title = $titleIndex !== null ? trim($lines[$titleIndex]) : null;
+        $text = implode(' ', $lines);
+        $cargos = [];
+        if (Str::contains(Str::upper($text), 'CHARTERING CONFIRMATION')) {
+            $cargo = [
+                'package_count' => 1,
+                'package_type' => 'pallet',
+                'title' => 'PAPER ROLLS',
+            ];
+            preg_match('/REFERENCE\s*:\s*([A-Z0-9\-]+)/i', $text, $m);
+            if (!empty($m[1])) {
+                $cargo['number'] = trim($m[1]);
+            }
+            preg_match('/Weight\s*\.?\s*:\s*([0-9\.,]+)/i', $text, $m);
+            if (!empty($m[1])) {
+                $cargo['weight'] = (float) str_replace(',', '.', $m[1]);
+            }
+            preg_match('/M\.\s*nature\s*:\s*([A-Z ]+)/i', $text, $m);
+            if (!empty($m[1])) {
+                $cargo['title'] = trim($m[1]);
+            }
 
-        // weight line pattern (numbers with thousand separator)
-        $weightIndex = array_key_first(array_filter($lines, fn ($l) => preg_match('/[0-9]{1,3}\.?[0-9]{3},?[0-9]*/', trim($l)) === 1)) ?? null;
-        $weight = null;
-        if ($weightIndex !== null) {
-            $w = preg_replace('/[^0-9,\.]/', '', trim($lines[$weightIndex]));
-            $weight = $w !== '' ? (float) str_replace(',', '.', $w) : null;
+            $cargos[] = $cargo;
+            return $cargos;
         }
 
-        $numberIndex = array_key_first(array_filter($lines, fn ($l) => Str::contains(trim($l), 'OT :') || Str::contains(trim($l), 'REF'))) ?? null;
-        $number = $numberIndex !== null ? trim($lines[$numberIndex + 2] ?? '') : null;
+        $blocks = [];
+        $current = [];
 
-        $cargo = [
-            'package_count' => 1,
-            'package_type' => 'pallet',
-        ];
-
-        if (! empty($title)) {
-            $cargo['title'] = $title;
+        foreach ($lines as $line) {
+            if (Str::startsWith(Str::upper(trim($line)), 'COLLECTION')) {
+                if (!empty($current)) {
+                    $blocks[] = $current;
+                    $current = [];
+                }
+            }
+            $current[] = trim($line);
         }
 
-        if (! empty($number)) {
-            $cargo['number'] = $number;
+        if (!empty($current)) {
+            $blocks[] = $current;
         }
 
-        if ($weight !== null) {
-            $cargo['weight'] = $weight;
+        foreach ($blocks as $block) {
+            $blockText = implode(' ', $block);
+            if (!preg_match('/[0-9]+\s*(pallets?|rolls?)/i', $blockText)) {
+                continue;
+            }
+
+            preg_match('/([0-9]+)\s*(pallets?|rolls?)/i', $blockText, $m);
+            $title = $m[0] ?? null;
+            $count = isset($m[1]) ? (int)$m[1] : 1;
+            $type = isset($m[2]) ? strtolower($m[2]) : 'pallet';
+            if (in_array($type, ['pallets', 'pall', 'pal'])) {
+                $type = 'pallet';
+            }
+
+            preg_match_all('/\bREF[\s:]*([A-Z0-9\-]{3,})/i', $blockText, $refMatches);
+            $ref = $refMatches[1][0] ?? null;
+
+            if ($ref && preg_match('/^[0-9]{3,4}\s*-\s*[0-9]{1,2}(AM|PM)?$/i', $ref)) {
+                $ref = null;
+            }
+
+            preg_match('/([0-3]?[0-9]\/[0-1]?[0-9]\/[0-9]{4})/', $blockText, $dateMatch);
+            $date = $dateMatch[1] ?? null;
+
+            $cargo = [
+                'package_count' => $count,
+                'package_type' => $type,
+                'title' => $title ?? "{$count} {$type}s",
+            ];
+
+            if (!empty($ref)) {
+                $cargo['number'] = $ref;
+            }
+
+            if ($date) {
+                try {
+                    $cargo['datetime_from'] = Carbon::createFromFormat('d/m/Y', $date)->toIsoString();
+                } catch (\Exception $e) {
+
+                }
+            }
+
+            $cargos[] = $cargo;
         }
 
-        return [$cargo];
+        return $cargos;
     }
 
     /**
