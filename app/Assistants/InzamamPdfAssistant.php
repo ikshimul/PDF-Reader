@@ -303,7 +303,6 @@ class InzamamPdfAssistant extends PdfClient
         $output = [];
 
         if ($date) {
-            // Accept both d/m/yy and d/m/yyyy
             $formats = ['d/m/y', 'd/m/Y'];
 
             $base = null;
@@ -312,12 +311,11 @@ class InzamamPdfAssistant extends PdfClient
                     $base = Carbon::createFromFormat($fmt, $date);
                     break;
                 } catch (\Exception $e) {
-                    // continue
+                   
                 }
             }
 
             if ($base === null) {
-                // If parsing fails, return empty array
                 return $output;
             }
 
